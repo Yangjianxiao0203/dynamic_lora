@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from transformers import LlamaForCausalLM, LlamaTokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer,AutoTokenizer,AutoModelForCausalLM
 from datasets import load_dataset
 import math
 import os
@@ -26,8 +26,8 @@ class DynamicLoRALayer(nn.Module):
 
     def get_sparse_weights(self):
         # Apply soft thresholding
-        sparse_A = F.softshrink(self.lora_A, self.sparsity_threshold)
-        sparse_B = F.softshrink(self.lora_B, self.sparsity_threshold)
+        sparse_A = F.softshrink(self.lora_A, self.sparsity_threshold.item())
+        sparse_B = F.softshrink(self.lora_B, self.sparsity_threshold.item())
         return sparse_A, sparse_B
 
     def forward(self, x):
@@ -42,6 +42,7 @@ class DynamicLoRALayer(nn.Module):
 
 
 def replace_with_dynamic_lora(model, r_max):
+    print(f"replace model with dynamic lora layers: r {r_max}")
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
             parent_name = '.'.join(name.split('.')[:-1])
@@ -57,7 +58,11 @@ def load_alpaca_dataset(tokenizer, max_length=512):
 
     def tokenize_function(examples):
         prompt = "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:\n{output}"
-        texts = [prompt.format(**ex) for ex in examples]
+        # texts = [prompt.format(**ex) for ex in examples]
+        texts = []
+        for instruction, input_text, output_text in zip(examples["instruction"], examples["input"], examples["output"]):
+            text = prompt.format(instruction=instruction, input=input_text, output=output_text)
+            texts.append(text)
         return tokenizer(texts, padding="max_length", truncation=True, max_length=max_length)
 
     tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset["train"].column_names)
@@ -143,7 +148,6 @@ def update_lora_ranks(model):
 def main():
     # Initialize wandb
     # wandb.init(project="dynamirank-llama2-alpaca", name="experiment-1")
-
     # Hyperparameters
     r_max = 16
     batch_size = 8
@@ -151,9 +155,11 @@ def main():
     num_epochs = 3
 
     # Load model and tokenizer
-    model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf")
-    tokenizer = LlamaTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
-
+    model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
+    print(f"start loading model {model_path}")
+    model = AutoModelForCausalLM.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    print(f"model {model_path} loaded")
     # Replace linear layers with dynamic LoRA layers
     model = replace_with_dynamic_lora(model, r_max)
     model.to(device)
@@ -163,12 +169,15 @@ def main():
     train_dataset = AlpacaDataset(dataset)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
+    print("start loading optimizer and scheduler")
     # Optimizer and scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_loader) * num_epochs)
+    print("optimizer and scheduler loaded")
 
     # Training loop
     for epoch in range(num_epochs):
+        print(f"Epoch {epoch + 1}/{num_epochs}")
         train_loss = train(model, train_loader, optimizer, scheduler, device, epoch)
         val_loss = evaluate(model, train_loader, device)  # Using train_loader as val_loader for simplicity
         avg_rank = update_lora_ranks(model)
@@ -184,8 +193,9 @@ def main():
             f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Avg LoRA Rank: {avg_rank:.2f}")
 
     # Save the final model
-    model.save_pretrained("dynamirank_llama2_alpaca")
-    tokenizer.save_pretrained("dynamirank_llama2_alpaca")
+    save_model = "dynamic_qwen_0.5_alpaca"
+    model.save_pretrained(save_model)
+    tokenizer.save_pretrained(save_model)
 
 
 if __name__ == "__main__":
