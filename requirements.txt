@@ -1,0 +1,20 @@
+transformers
+accelerate
+torch
+datasets
+scikit-learn
+evaluate
+# mpi4py
+peft
+deepspeed
+wandb
+trl
+modelscope
+uvicorn
+swanlab
+#evaluation
+#git+https://github.com/EleutherAI/lm-evaluation-harness.git
+
+#oss
+oss2
+python-dotenv
