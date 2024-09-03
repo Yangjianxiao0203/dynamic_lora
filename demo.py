@@ -8,13 +8,25 @@ import math
 import os
 
 # Set environment variables and device
-os.environ['WANDB_PROJECT'] = "dynamirank-llama2-alpaca"
+# os.environ['WANDB_PROJECT'] = "dynamirank-llama2-alpaca"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model_path = "bert-base-uncased"
+model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
+save_model = "dynamic_qwen_0.5_alpaca"
 
 
 class DynamicLoRALayer(nn.Module):
-    def __init__(self, in_features, out_features, r_max):
+    def __init__(self, original_linear, r_max):
         super().__init__()
+        self.original_linear = original_linear
+
+        # 冻结原始线性层的权重和偏置
+        for param in self.original_linear.parameters():
+            param.requires_grad = False
+
+        # LoRA 低秩矩阵
+        in_features = original_linear.in_features
+        out_features = original_linear.out_features
         self.lora_A = nn.Parameter(torch.zeros(r_max, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, r_max))
         self.scaling = 1 / r_max
@@ -31,8 +43,15 @@ class DynamicLoRALayer(nn.Module):
         return sparse_A, sparse_B
 
     def forward(self, x):
+        original_output = self.original_linear(x)
+
         sparse_A, sparse_B = self.get_sparse_weights()
-        return (sparse_B @ sparse_A @ x.T).T * self.scaling
+        lora_intermediate = torch.einsum('bsi,ri->brs', x, sparse_A)  # (batch_size, r_max, seq_len)
+        lora_output = torch.einsum('brs,or->bos', lora_intermediate, sparse_B)  # (batch_size, out_features, seq_len)
+
+        lora_output = lora_output.permute(0, 2, 1)  # (batch_size, seq_len, out_features)
+        # print(f"lora_output shape: {lora_output.shape}")
+        return original_output + lora_output * self.scaling
 
     def estimate_rank(self):
         sparse_A, sparse_B = self.get_sparse_weights()
@@ -47,8 +66,9 @@ def replace_with_dynamic_lora(model, r_max):
         if isinstance(module, nn.Linear):
             parent_name = '.'.join(name.split('.')[:-1])
             child_name = name.split('.')[-1]
+            print(f"replace {parent_name}.{child_name} with DynamicLoRALayer")
             parent = model.get_submodule(parent_name)
-            dynamic_lora = DynamicLoRALayer(module.in_features, module.out_features, r_max)
+            dynamic_lora = DynamicLoRALayer(module, r_max)
             setattr(parent, child_name, dynamic_lora)
     return model
 
@@ -155,7 +175,6 @@ def main():
     num_epochs = 3
 
     # Load model and tokenizer
-    model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
     print(f"start loading model {model_path}")
     model = AutoModelForCausalLM.from_pretrained(model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -174,13 +193,17 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_loader) * num_epochs)
     print("optimizer and scheduler loaded")
-
+    print("training started")
+    print("*" * 20)
     # Training loop
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
         train_loss = train(model, train_loader, optimizer, scheduler, device, epoch)
+        print(f"train_loss: {train_loss}")
         val_loss = evaluate(model, train_loader, device)  # Using train_loader as val_loader for simplicity
+        print(f"val_loss: {val_loss}")
         avg_rank = update_lora_ranks(model)
+        print(f"avg_rank: {avg_rank}")
 
         current_log = {
             "epoch": epoch,
@@ -193,7 +216,6 @@ def main():
             f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Avg LoRA Rank: {avg_rank:.2f}")
 
     # Save the final model
-    save_model = "dynamic_qwen_0.5_alpaca"
     model.save_pretrained(save_model)
     tokenizer.save_pretrained(save_model)
 
