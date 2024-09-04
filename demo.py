@@ -11,7 +11,6 @@ import os
 #TODO: 沟通：1. rank稀疏化策略。现在lora的rank全是0，这是为什么。 2. 评测策略，这种模型，怎么save 后变成huggingface格式开始评测
 
 # Set environment variables and device
-#TODO: 加入swanlab
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # model_path = "bert-base-uncased"
 model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
@@ -60,6 +59,7 @@ class DynamicLoRALayer(nn.Module):
         sparse_A, sparse_B = self.get_sparse_weights()
         combined = sparse_B @ sparse_A
         singular_values = torch.linalg.svdvals(combined)
+        print(f"rank: {singular_values}")
         return torch.sum(singular_values > 1e-5).item()
 
 def replace_with_dynamic_lora(model, r_max,keywords=[]):
