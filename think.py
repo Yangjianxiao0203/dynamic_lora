@@ -18,12 +18,13 @@ class DynamicLoRALayer(nn.Module):
     def __init__(self, original_linear, r_max):
         super().__init__()
         self.original_linear = original_linear
+        self.r_max = r_max
+        self.rank_threshold = 1e-5 * 3
 
         # Freeze the original weights
         for param in self.original_linear.parameters():
             param.requires_grad = False
 
-        # LoRA low-rank matrices
         in_features = original_linear.in_features
         out_features = original_linear.out_features
         self.lora_A = nn.Parameter(torch.zeros(r_max, in_features))
@@ -42,7 +43,6 @@ class DynamicLoRALayer(nn.Module):
         # Forward pass through the original layer
         original_output = self.original_linear(x)
 
-        # Apply LoRA low-rank approximation
         sparse_A, sparse_B = self.get_sparse_weights()
         lora_intermediate = torch.einsum('bsi,ri->brs', x, sparse_A)  # (batch_size, r_max, seq_len)
         lora_output = torch.einsum('brs,or->bos', lora_intermediate, sparse_B)  # (batch_size, out_features, seq_len)
@@ -50,7 +50,7 @@ class DynamicLoRALayer(nn.Module):
 
         return original_output + lora_output * self.scaling
 
-    def reduce_rank_with_svd(self, verbose=True):
+    def reduce_rank_with_svd(self, verbose=True, scale=1/3):
         with torch.no_grad():
             # Compute the combined matrix from lora_B and lora_A
             combined = self.lora_B @ self.lora_A
@@ -64,6 +64,7 @@ class DynamicLoRALayer(nn.Module):
                 print(f"lora_b grad: {self.lora_B.grad}")
             # Perform Singular Value Decomposition (SVD)
             U, S, Vh = torch.linalg.svd(combined, full_matrices=False)
+
             #如果S都是0，退出，不更新
             if torch.all(S == 0):
                 if verbose:
@@ -73,14 +74,16 @@ class DynamicLoRALayer(nn.Module):
                 print(f"u shape: {U.shape}")
                 print(f"s shape: {S.shape}")
                 print(f"vh shape: {Vh.shape}")
-            rank_threshold = 1e-5
-            if verbose:
-                print(f"s before thresholding: {len(S)}")
-            S[S < rank_threshold] = 0
-            if verbose:
-                print(f"s after thresholding: {len(S)}")
 
-            r_actual = min(self.lora_A.size(0), len(S))
+            self.rank_threshold = 1/3 * self.rank_threshold
+            num_greater_than_threshold = torch.sum(S > self.rank_threshold).item()
+            if verbose:
+                print(f"S: {S[:16]}")
+                print(f"next rank: {num_greater_than_threshold}")
+                print(f"rank threshole: {self.rank_threshold}")
+                print(f"scale: {scale}")
+
+            r_actual = min(self.lora_A.size(0), num_greater_than_threshold)
             if verbose:
                 print(f"r actual: {r_actual}")
             reduced_A = Vh[:r_actual, :].T @ torch.diag(S[:r_actual])
@@ -173,13 +176,13 @@ def evaluate(model, val_loader, device):
     return total_loss / len(val_loader)
 
 
-def update_lora_ranks(model):
+def update_lora_ranks(model,scale):
     total_rank = 0
     num_lora_layers = 0
     verbose= True
     for module in model.modules():
         if isinstance(module, DynamicLoRALayer):
-            module.reduce_rank_with_svd(verbose)
+            module.reduce_rank_with_svd(verbose,scale=scale)
             combined = module.lora_B @ module.lora_A
             singular_values = torch.linalg.svdvals(combined)
             current_rank = torch.sum(singular_values > 1e-5).item()
@@ -197,7 +200,7 @@ def main():
     r_max = 16
     batch_size = 8
     learning_rate = 1e-4
-    num_epochs = 3
+    num_epochs = 6
 
     # Load model and tokenizer
     print(f"Loading model {model_path}")
@@ -220,10 +223,15 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=len(train_loader) * num_epochs)
 
     # Training loop
+    pre_loss = None
+    scale = 1/3
     for epoch in range(num_epochs):
-        avg_rank = update_lora_ranks(model)
+        avg_rank = update_lora_ranks(model,scale)
         print(f"Epoch {epoch + 1}/{num_epochs}")
         train_loss = train(model, train_loader, optimizer, scheduler, device, epoch)
+        if pre_loss:
+            scale = pre_loss / train_loss
+        pre_loss = train_loss
         val_loss = evaluate(model, train_loader, device)
         print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Avg LoRA Rank: {avg_rank:.2f}")
 
