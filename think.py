@@ -13,6 +13,7 @@ import swanlab
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 save_model = "dynamic_qwen_0.5_alpaca"
 
+
 # TODO：写一下utils，能吧lora下前32个秩画一个曲线，看看每次更新时会降低多少
 # update不要按epoch更新，按step更新
 # 试一下其他的模型，比如1.5B, 7B版本的, 看看模型大小和scale的关系
@@ -100,9 +101,16 @@ class DynamicLoRALayer(nn.Module):
             self.lora_B[:, :r_actual] = reduced_B
 
 
+def count_trainable_params(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+#TODO: 封装进类里，然后用一个存的方法存下所有Lora层，有个load可以加载，这样就避免模型跑不干净的问题了，但是评测还是需要自己写
 def replace_with_dynamic_lora(model, r_max, keywords=[]):
     print(f"Replacing model layers with dynamic LoRA layers: r_max={r_max}")
     for name, module in model.named_modules():
+        for param in module.parameters():
+            param.requires_grad = False
         if isinstance(module, nn.Linear):
             if not any(keyword in name for keyword in keywords):
                 continue
@@ -112,6 +120,7 @@ def replace_with_dynamic_lora(model, r_max, keywords=[]):
             parent = model.get_submodule(parent_name)
             dynamic_lora = DynamicLoRALayer(module, r_max, name)
             setattr(parent, child_name, dynamic_lora)
+    print(f"Total trainable parameters: {count_trainable_params(model)}")
     return model
 
 
@@ -158,10 +167,10 @@ def train(model, train_loader, optimizer, scheduler, device, epoch, **kwargs):
 
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         loss = outputs.loss
-        print(f"epoch {epoch}, batch {index}, loss: {loss.item()}")
-        #记录每一个lora层的情况
-        if epoch > 0 or index > 0:
-            snapshot_lora_ranks(model, index,epoch, loss, file_name=snapshot_path)
+        print(f"epoch {epoch}, batch {index}, loss: {loss.item() / input_ids.shape[0]}, batch size: {input_ids.shape[0]}")
+        # # 记录每一个lora层的情况
+        # if epoch > 0 or index > 0:
+        #     snapshot_lora_ranks(model, index, epoch, loss, file_name=snapshot_path)
 
         loss.backward()
         optimizer.step()
@@ -205,7 +214,7 @@ def update_lora_ranks(model, scale):
     return avg_rank
 
 
-def snapshot_lora_ranks(model,step_num, epoch, loss, file_name="singular_values.jsonl"):
+def snapshot_lora_ranks(model, step_num, epoch, loss, file_name="singular_values.jsonl"):
     with open(f'./records/{file_name}', 'a') as f:
         for name, module in model.named_modules():
             if isinstance(module, DynamicLoRALayer):
@@ -215,10 +224,10 @@ def snapshot_lora_ranks(model,step_num, epoch, loss, file_name="singular_values.
                 singular_values = S[:32].cpu().tolist()
                 dic = {
                     "name": name,
-                    "step_num":step_num,
-                    "epoch":epoch,
+                    "step_num": step_num,
+                    "epoch": epoch,
                     "ranks": singular_values,
-                    "loss": loss
+                    "loss": loss.item()
                 }
                 f.write(json.dumps(dic, ensure_ascii=False) + '\n')
 
@@ -229,7 +238,7 @@ def main(model_path, snapshot_path):
     r_max = 32
     batch_size = 8
     learning_rate = 1e-4
-    num_epochs = 6
+    num_epochs = 2
 
     # Load model and tokenizer
     print(f"Loading model {model_path}")
@@ -243,7 +252,7 @@ def main(model_path, snapshot_path):
 
     # Load and prepare dataset
     dataset = load_alpaca_dataset(tokenizer)
-    dataset = dataset.select(range(100))
+    dataset = dataset.select(range(5000))
 
     train_dataset = AlpacaDataset(dataset)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -266,15 +275,15 @@ def main(model_path, snapshot_path):
         print(
             f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Avg LoRA Rank: {avg_rank:.2f}")
 
-    # Save the final model
-    model.save_pretrained(save_model)
-    tokenizer.save_pretrained(save_model)
+    # # Save the final model   how to save the model
+    # model.save_pretrained(save_model)
+    # tokenizer.save_pretrained(save_model)
 
 
 if __name__ == "__main__":
-    # model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
-    model_path = "/root/autodl-tmp/models/qwen/Qwen2-1___5B"
+    model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
+    # model_path = "/root/autodl-tmp/models/qwen/Qwen2-1___5B"
     run_times = 5
     for i in range(run_times):
-        snapshot_path = f"qwen-1_5-exp-{i+1}.jsonl"
-        main(model_path,snapshot_path)
+        snapshot_path = f"qwen-1_5-exp-{i + 1}.jsonl"
+        main(model_path, snapshot_path)

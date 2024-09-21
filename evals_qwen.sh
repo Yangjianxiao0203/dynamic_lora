@@ -22,7 +22,7 @@ PEFT_SUFFIXES=(
 )
 
 # 循环遍历 PEFT 路径数组并运行评估
-cd /root/autodl-tmp/codes/qwen_stf/lm-evaluation-harness
+cd /root/autodl-tmp/codes/qwen_stf/lm-evaluations-harness
 for PEFT_SUFFIX in "${PEFT_SUFFIXES[@]}"; do
     PEFT_PATH="${PEFT_PREFIX}/${PEFT_SUFFIX}"
     echo "Running evaluation with PEFT model: $PEFT_PATH"
