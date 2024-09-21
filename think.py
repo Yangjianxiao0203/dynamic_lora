@@ -1,3 +1,5 @@
+import json
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,19 +9,23 @@ from datasets import load_dataset
 import math
 import swanlab
 
-
 # Set environment variables and device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
 save_model = "dynamic_qwen_0.5_alpaca"
+
+# TODO：写一下utils，能吧lora下前32个秩画一个曲线，看看每次更新时会降低多少
+# update不要按epoch更新，按step更新
+# 试一下其他的模型，比如1.5B, 7B版本的, 看看模型大小和scale的关系
+# 怎么save新structure的model
 
 
 class DynamicLoRALayer(nn.Module):
-    def __init__(self, original_linear, r_max):
+    def __init__(self, original_linear, r_max, name):
         super().__init__()
         self.original_linear = original_linear
         self.r_max = r_max
-        self.rank_threshold = 1e-5 * 3
+        # self.rank_threshold = 1e-5 * 3
+        self.rank_threshold = 0
 
         # Freeze the original weights
         for param in self.original_linear.parameters():
@@ -30,6 +36,7 @@ class DynamicLoRALayer(nn.Module):
         self.lora_A = nn.Parameter(torch.zeros(r_max, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, r_max))
         self.scaling = 1 / r_max
+        self.name = name
 
         # Initialize LoRA matrices
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
@@ -50,7 +57,7 @@ class DynamicLoRALayer(nn.Module):
 
         return original_output + lora_output * self.scaling
 
-    def reduce_rank_with_svd(self, verbose=True, scale=1/3):
+    def reduce_rank_with_svd(self, verbose=True, scale=1 / 3):
         with torch.no_grad():
             # Compute the combined matrix from lora_B and lora_A
             combined = self.lora_B @ self.lora_A
@@ -65,7 +72,7 @@ class DynamicLoRALayer(nn.Module):
             # Perform Singular Value Decomposition (SVD)
             U, S, Vh = torch.linalg.svd(combined, full_matrices=False)
 
-            #如果S都是0，退出，不更新
+            # 如果S都是0，退出，不更新
             if torch.all(S == 0):
                 if verbose:
                     print("All singular values are zero. Exiting without updating.")
@@ -75,7 +82,7 @@ class DynamicLoRALayer(nn.Module):
                 print(f"s shape: {S.shape}")
                 print(f"vh shape: {Vh.shape}")
 
-            self.rank_threshold = 1/3 * self.rank_threshold
+            self.rank_threshold = 1 / 3 * self.rank_threshold
             num_greater_than_threshold = torch.sum(S > self.rank_threshold).item()
             if verbose:
                 print(f"S: {S[:16]}")
@@ -103,7 +110,7 @@ def replace_with_dynamic_lora(model, r_max, keywords=[]):
             child_name = name.split('.')[-1]
             print(f"Replacing {parent_name}.{child_name} with DynamicLoRALayer")
             parent = model.get_submodule(parent_name)
-            dynamic_lora = DynamicLoRALayer(module, r_max)
+            dynamic_lora = DynamicLoRALayer(module, r_max, name)
             setattr(parent, child_name, dynamic_lora)
     return model
 
@@ -139,7 +146,8 @@ class AlpacaDataset(Dataset):
         }
 
 
-def train(model, train_loader, optimizer, scheduler, device, epoch):
+def train(model, train_loader, optimizer, scheduler, device, epoch, **kwargs):
+    snapshot_path = kwargs.get("snapshot_path", None)
     model.train()
     total_loss = 0
     for index, batch in enumerate(train_loader):
@@ -151,6 +159,9 @@ def train(model, train_loader, optimizer, scheduler, device, epoch):
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
         loss = outputs.loss
         print(f"epoch {epoch}, batch {index}, loss: {loss.item()}")
+        #记录每一个lora层的情况
+        if epoch > 0 or index > 0:
+            snapshot_lora_ranks(model, index,epoch, loss, file_name=snapshot_path)
 
         loss.backward()
         optimizer.step()
@@ -176,28 +187,46 @@ def evaluate(model, val_loader, device):
     return total_loss / len(val_loader)
 
 
-def update_lora_ranks(model,scale):
+def update_lora_ranks(model, scale):
     total_rank = 0
     num_lora_layers = 0
-    verbose= True
+    verbose = True
     for module in model.modules():
         if isinstance(module, DynamicLoRALayer):
-            module.reduce_rank_with_svd(verbose,scale=scale)
+            module.reduce_rank_with_svd(verbose, scale=scale)
             combined = module.lora_B @ module.lora_A
             singular_values = torch.linalg.svdvals(combined)
             current_rank = torch.sum(singular_values > 1e-5).item()
             total_rank += current_rank
             num_lora_layers += 1
-            verbose= False
+            verbose = False
 
     avg_rank = total_rank / num_lora_layers if num_lora_layers > 0 else 0
     return avg_rank
 
 
-def main():
+def snapshot_lora_ranks(model,step_num, epoch, loss, file_name="singular_values.jsonl"):
+    with open(f'./records/{file_name}', 'a') as f:
+        for name, module in model.named_modules():
+            if isinstance(module, DynamicLoRALayer):
+                combined = module.lora_B @ module.lora_A
+                U, S, Vh = torch.linalg.svd(combined, full_matrices=False)
+                # 记录唯一名字和前32个秩
+                singular_values = S[:32].cpu().tolist()
+                dic = {
+                    "name": name,
+                    "step_num":step_num,
+                    "epoch":epoch,
+                    "ranks": singular_values,
+                    "loss": loss
+                }
+                f.write(json.dumps(dic, ensure_ascii=False) + '\n')
+
+
+def main(model_path, snapshot_path):
     # swanlab.init(project="qwen-0.5B", experiment="experiment-1")
 
-    r_max = 16
+    r_max = 32
     batch_size = 8
     learning_rate = 1e-4
     num_epochs = 6
@@ -215,6 +244,7 @@ def main():
     # Load and prepare dataset
     dataset = load_alpaca_dataset(tokenizer)
     dataset = dataset.select(range(100))
+
     train_dataset = AlpacaDataset(dataset)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
@@ -224,16 +254,17 @@ def main():
 
     # Training loop
     pre_loss = None
-    scale = 1/3
+    scale = 1 / 3
     for epoch in range(num_epochs):
-        avg_rank = update_lora_ranks(model,scale)
+        avg_rank = update_lora_ranks(model, scale)
         print(f"Epoch {epoch + 1}/{num_epochs}")
-        train_loss = train(model, train_loader, optimizer, scheduler, device, epoch)
+        train_loss = train(model, train_loader, optimizer, scheduler, device, epoch, snapshot_path=snapshot_path)
         if pre_loss:
             scale = pre_loss / train_loss
         pre_loss = train_loss
         val_loss = evaluate(model, train_loader, device)
-        print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Avg LoRA Rank: {avg_rank:.2f}")
+        print(
+            f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Avg LoRA Rank: {avg_rank:.2f}")
 
     # Save the final model
     model.save_pretrained(save_model)
@@ -241,4 +272,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
+    model_path = "/root/autodl-tmp/models/qwen/Qwen2-1___5B"
+    run_times = 5
+    for i in range(run_times):
+        snapshot_path = f"qwen-1_5-exp-{i+1}.jsonl"
+        main(model_path,snapshot_path)
