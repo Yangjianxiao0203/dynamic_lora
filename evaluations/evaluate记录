@@ -1,0 +1,10 @@
+评估指标	适用任务	典型数据集
+Accuracy	多项选择题、分类任务	MMLU, SWAG, HellaSwag, GLUE
+F1 Score	分类任务、不平衡数据任务、信息抽取	SQuAD, CoNLL-2003 NER, SuperGLUE
+BLEU	机器翻译、文本生成	WMT, XSum
+ROUGE	文本生成、摘要生成	CNN/DailyMail, XSum
+Perplexity	语言模型、文本生成	WikiText, Penn Treebank
+Exact Match	问答、生成任务	SQuAD, CodeXGLUE
+AUC-ROC	二分类任务、类别不平衡任务	GLUE, IMDB, MNLI
+MRR	信息检索、对话系统	MS MARCO, TREC
+METEOR	机器翻译、文本生成	WMT, OpenSubtitles

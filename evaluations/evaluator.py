@@ -6,11 +6,13 @@ from abc import ABC, abstractmethod
 
 
 class LogLikelihoodEvaluator(ABC):
-    def __init__(self, model_name, device='cuda'):
+    def __init__(self, model_name, device='cuda', num_few_shot=0):
         self.model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.device = device
         self.prompt_template = None
+        self.num_few_shot = num_few_shot
+        self.few_shot_examples = []
 
     def load_dataset(self, dataset_name, dataset_split='validation', subset=None, **kwargs):
         # 通用的数据集加载方法，允许传入不同的数据集名称
@@ -19,6 +21,10 @@ class LogLikelihoodEvaluator(ABC):
         else:
             self.dataset = load_dataset(dataset_name, split=dataset_split, **kwargs)
         print(f"Loaded dataset {dataset_name} with {len(self.dataset)} samples.")
+
+    def load_few_shot_examples(self, few_shot_data):
+        """加载 few-shot 示例"""
+        self.few_shot_examples = few_shot_data
 
     def encode(self, context, continuation):
         # 将问题和选项编码为输入张量
@@ -70,7 +76,8 @@ class LogLikelihoodEvaluator(ABC):
             selected_logits = torch.gather(logits_for_continuation, 2, continuation_tensor).squeeze(-1)
 
             log_likelihood = selected_logits.sum().item()
-            loglikelihoods.append(log_likelihood)
+            avg_log_likelihood = log_likelihood / continuation_len  # 计算平均 log-likelihood
+            loglikelihoods.append(avg_log_likelihood)
 
         return loglikelihoods
 
@@ -133,8 +140,13 @@ class HellaSwagEvaluator(LogLikelihoodEvaluator):
 class MMLUEvaluator(LogLikelihoodEvaluator):
 
     def format_prompt(self, sample):
-        self.prompt_template = Template("Question: $question\nAnswer:")
-        context = self.prompt_template.substitute(question=sample['question'], answer='')
+        self.prompt_template = Template("Question: $question\nAnswer: $answer")
+        few_shot_context = ""
+        for example in self.few_shot_examples[:self.num_few_shot]:
+            few_shot_context += self.prompt_template.substitute(question=example['question'], answer=example['answer'])
+            few_shot_context += "\n\n"  # 在 few-shot 示例之间加入换行
+
+        context = few_shot_context + self.prompt_template.substitute(question=sample['question'], answer='')
         continuations = sample['choices']
         return context, continuations
 
@@ -142,16 +154,23 @@ class MMLUEvaluator(LogLikelihoodEvaluator):
         return sample['answer']
 
 
-
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # evaluator = MMLUEvaluator('/root/autodl-tmp/models/qwen/Qwen2-0___5B', device=device)
+    evaluator = MMLUEvaluator('bert-base-uncased', device=device, num_few_shot=5)
+    evaluator.load_dataset('cais/mmlu', subset='all')
+    few_shot_data = [
+        {"question": "What is the capital of France?", "answer": "Paris"},
+        {"question": "What is 2+2?", "answer": "4"},
+        {"question": "Who wrote '1984'?", "answer": "George Orwell"},
+        {"question": "What is the boiling point of water?", "answer": "100 degrees Celsius"},
+        {"question": "What is the largest planet in the Solar System?", "answer": "Jupiter"},
+    ]
+    evaluator.load_few_shot_examples(few_shot_data)
+    evaluator.evaluate(num_samples=1000)
     # evaluator = HellaSwagEvaluator('bert-base-uncased', device=device)
-    evaluator = MMLUEvaluator('bert-base-uncased', device=device)
-    evaluator.load_dataset('cais/mmlu', subset='astronomy')
-    evaluator.evaluate(num_samples=10)
-
-    # evaluator.load_dataset('Rowan/hellaswag', dataset_split='validation')
-    # evaluator.evaluate(num_samples=10)
+    # evaluator.load_dataset('AlekseyKorshuk/hellaswag', dataset_split='validation')
+    # evaluator.evaluate(num_samples=30)
 
 
 if __name__ == '__main__':
