@@ -6,10 +6,13 @@ from abc import ABC, abstractmethod
 
 
 class LogLikelihoodEvaluator(ABC):
-    def __init__(self, model_name, device='cuda', num_few_shot=0):
-        self.model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+    def __init__(self, model,tokenizer, device='cuda', num_few_shot=0):
+        # self.model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+        # self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = model
+        self.tokenizer = tokenizer
         self.device = device
+        print(f"evaluator device: {device}")
         self.prompt_template = None
         self.num_few_shot = num_few_shot
         self.few_shot_examples = []
@@ -64,9 +67,9 @@ class LogLikelihoodEvaluator(ABC):
             index = torch.tensor([[0, 1, 2, 0],
                                   [2, 0, 1, 3],
                                   [3, 1, 2, 0]])
-        
+
             output = torch.gather(input, dim=1, index=index)
-            
+
             output = tensor([[ 1,  2,  3,  1],
                             [ 7,  5,  6,  8],
                             [12, 10, 11,  9]])
@@ -156,8 +159,11 @@ class MMLUEvaluator(LogLikelihoodEvaluator):
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    # evaluator = MMLUEvaluator('/root/autodl-tmp/models/qwen/Qwen2-0___5B', device=device)
-    evaluator = MMLUEvaluator('bert-base-uncased', device=device, num_few_shot=5)
+    model_name = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
+    model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    evaluator = MMLUEvaluator(model,tokenizer, device=device,num_few_shot=5)
     evaluator.load_dataset('cais/mmlu', subset='all')
     few_shot_data = [
         {"question": "What is the capital of France?", "answer": "Paris"},

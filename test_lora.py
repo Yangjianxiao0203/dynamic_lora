@@ -37,7 +37,6 @@ tokenizer.pad_token = tokenizer.eos_token
 
 
 def process_func(example):
-    # Llama分词器会将一个中文字切分为多个token，因此需要放开一些最大长度，保证数据的完整性
     input_ids, attention_mask, labels = [], [], []
     instruction = tokenizer \
         (f"You are a very helpful assistant. Please Answer the following question: \n{example['instruction'] + example['input']}\n",
@@ -75,9 +74,10 @@ def train(lora_num):
 
     # 预处理数据集
     tokenized_dataset = all_dataset.map(process_func, batched=False, remove_columns=columns_to_remove)
-    split_dataset = tokenized_dataset.train_test_split(test_size=0.1)
-    test_dataset = split_dataset["test"]
-    train_dataset = split_dataset["train"]
+    # split_dataset = tokenized_dataset.train_test_split(test_size=0.1)
+    # test_dataset = split_dataset["test"]
+    # train_dataset = split_dataset["train"]
+    train_dataset = tokenized_dataset
     model = AutoModelForCausalLM.from_pretrained(model_path,device_map="auto")
     model.enable_input_require_grads()
     config = LoraConfig(
@@ -85,7 +85,7 @@ def train(lora_num):
         target_modules=["q_proj", "k_proj", "v_proj"],
         inference_mode=False,
         r=lora_num,
-        lora_alpha = 1
+        lora_alpha=1
         # lora_alpha=2*lora_num,
         # lora_dropout=0.1
     )
@@ -101,7 +101,7 @@ def train(lora_num):
         logging_steps=3,
         num_train_epochs=6,
         save_steps=600,
-        learning_rate=3e-5,
+        learning_rate=1e-4,
         # weight_decay=0.01,  # 默认参数
         # warmup_steps=int(0.33 * (len(tokenized_dataset) // (16 * 4))),
         # save_on_each_node=True,
@@ -110,7 +110,6 @@ def train(lora_num):
         report_to="none",
     )
 
-    # 创建自定义回调类
     class CustomLoggingCallback(TrainerCallback):
         def on_log(self, args, state, control, logs=None, **kwargs):
             if logs is not None:
@@ -166,7 +165,7 @@ def main():
 
 
 if __name__ == '__main__':
-    loras = [32,64]
+    loras = [32]
     for lora_num in loras:
         print(f"current processing r={lora_num}")
         train(lora_num)

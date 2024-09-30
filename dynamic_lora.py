@@ -114,6 +114,7 @@ class DynamicLoRAManager:
         self.r_max = r_max
         self.keywords = keywords
         self.dynamic_lora_layers = {}
+        self.device = next(model.parameters()).device
 
     def replace_with_dynamic_lora(self):
         print(f"Replacing model layers with dynamic LoRA layers: r_max={self.r_max}")
@@ -147,8 +148,8 @@ class DynamicLoRAManager:
         # 相当于置换，把manager中的lora layer的权重，lora_A, lora_B 替换进去
         for name, lora_layer in self.dynamic_lora_layers.items():
             if name in lora_state_dict:
-                lora_layer.lora_A.data = lora_state_dict[name]["lora_A"].to(lora_layer.lora_A.device)
-                lora_layer.lora_B.data = lora_state_dict[name]["lora_B"].to(lora_layer.lora_B.device)
+                lora_layer.lora_A.data = lora_state_dict[name]["lora_A"].to(self.device)
+                lora_layer.lora_B.data = lora_state_dict[name]["lora_B"].to(self.device)
         print(f"LoRA layers loaded from {load_path}")
 
     def update_lora_ranks(self, scale):
@@ -265,7 +266,7 @@ def main(model_path, keywords, snapshot_path = None, save_lora_path="lora_state.
 
     # Load and prepare dataset
     dataset = load_alpaca_dataset(tokenizer)
-    dataset = dataset.select(range(16))
+    dataset = dataset.select(range(5000))
 
     train_dataset = AlpacaDataset(dataset)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -295,12 +296,12 @@ def main(model_path, keywords, snapshot_path = None, save_lora_path="lora_state.
 
 
 if __name__ == "__main__":
-    # model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
+    model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
     # run_times = 5
     # for i in range(run_times):
     #     snapshot_path = f"qwen-1_5-exp-{i + 1}.jsonl"
     #     main(model_path, snapshot_path)
-    model_path = "bert-base-uncased"
-    keywords = ["query", "key", "value"]
-    lora_path = "lora_state.pth"
-    main(model_path,keywords,load_lora_path=lora_path)
+    # model_path = "bert-base-uncased"
+    keywords = ["q_proj", "k_proj", "v_proj"]
+    # lora_path = "qwen_lora_state.pth"
+    main(model_path,keywords)
