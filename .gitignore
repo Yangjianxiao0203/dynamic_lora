@@ -2,3 +2,4 @@
 /lm-evaluation-harness
 oss_handler/.env
 /images
+**/*.pth
