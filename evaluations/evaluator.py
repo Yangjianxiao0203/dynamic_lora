@@ -40,6 +40,7 @@ class LogLikelihoodEvaluator(ABC):
         看每个选项，谁的logllikelihood加起来最大，选哪个
         '''
         loglikelihoods = []
+        max_tokens = []
         for continuation in continuations:
             context_enc, continuation_enc = self.encode(context, continuation)
 
@@ -78,11 +79,18 @@ class LogLikelihoodEvaluator(ABC):
             # 按照 continuation_tensor 提供的索引，从每个 token 对应的词汇表中选择特定词汇的 logits（即 log 概率）。 dim=2 是词汇表的维度
             selected_logits = torch.gather(logits_for_continuation, 2, continuation_tensor).squeeze(-1)
 
+            # 找到概率最大的 token
+            max_logit_indices = torch.argmax(logits_for_continuation, dim=-1)
+            max_tokens.append(max_logit_indices.squeeze().tolist())
+
             log_likelihood = selected_logits.sum().item()
             avg_log_likelihood = log_likelihood / continuation_len  # 计算平均 log-likelihood
             loglikelihoods.append(avg_log_likelihood)
 
-        return loglikelihoods
+        # decoded_max_token = self.tokenizer.decode(max_tokens, skip_special_tokens=True)
+        # print(f"Predicted Token with Highest Probability: {decoded_max_token}")
+
+        return loglikelihoods, max_tokens
 
     @abstractmethod
     def format_prompt(self, sample):
@@ -105,22 +113,23 @@ class LogLikelihoodEvaluator(ABC):
         correct_answer_idx = self.get_correct_answer(sample)
 
         # 计算每个选项的log-likelihood
-        loglikelihoods = self.calculate_loglikelihood(context, continuations)
+        loglikelihoods, max_tokens = self.calculate_loglikelihood(context, continuations)
 
         # 选择log-likelihood最大的选项
         predicted_idx = torch.argmax(torch.tensor(loglikelihoods)).item()
         correct = predicted_idx == correct_answer_idx
 
-        return correct, predicted_idx, correct_answer_idx, loglikelihoods
+        return correct, predicted_idx, correct_answer_idx, loglikelihoods, max_tokens
 
     def evaluate(self, num_samples=100):
         # 评估多个样本的准确率
         correct_count = 0
         for i, sample in enumerate(self.dataset.select(range(num_samples))):
-            correct, predicted_idx, correct_answer_idx, loglikelihoods = self.evaluate_sample(sample)
+            correct, predicted_idx, correct_answer_idx, loglikelihoods, max_tokens = self.evaluate_sample(sample)
             correct_count += int(correct)
+            decoded_max_token = self.tokenizer.decode(max_tokens[0], skip_special_tokens=True)
             print(
-                f"[{i}]: Predicted {predicted_idx}, Correct {correct_answer_idx}, Log-likelihoods: {loglikelihoods}")
+                f"[{i}]: Predicted {predicted_idx}, Correct {correct_answer_idx}, Log-likelihoods: {loglikelihoods}, highest prob: {decoded_max_token}")
 
         accuracy = correct_count / num_samples
         print(f"Accuracy: {accuracy:.2f}")
@@ -143,35 +152,68 @@ class HellaSwagEvaluator(LogLikelihoodEvaluator):
 class MMLUEvaluator(LogLikelihoodEvaluator):
 
     def format_prompt(self, sample):
-        self.prompt_template = Template("Question: $question\nAnswer: $answer")
-        few_shot_context = ""
+        """
+        构建问题提示，形式为:
+        "You are an expert in the field of text classification. Please choose the most appropriate option from [A, B, C, D] based on the given context and output only one option, followed directly by '#Answer: '."
+        """
+        # 模板和示例之间的上下文处理
+        prompt = f"""You are an expert in the field of text classification. Please choose the most appropriate option from [A, B, C, D] based on the given context and output only one option. \n"""
         for example in self.few_shot_examples[:self.num_few_shot]:
-            few_shot_context += self.prompt_template.substitute(question=example['question'], answer=example['answer'])
-            few_shot_context += "\n\n"  # 在 few-shot 示例之间加入换行
+            prompt += f"Question: {example['question']}\n"
+            prompt += "\n".join([f"{choice}" for idx, choice in enumerate(example['choices'])])
+            prompt += f"\nAnswer: {example['answer']}\n\n"
 
-        context = few_shot_context + self.prompt_template.substitute(question=sample['question'], answer='')
-        continuations = sample['choices']
-        return context, continuations
+        # 构建 MMLU 问题提示
+        context = sample['question']
+        choices = sample['choices']
+        prompt += f"""Question: {context}\n"""
+        # 添加选项
+        prompt += "\n".join([f"{chr(65 + idx)}. {choice}" for idx, choice in enumerate(choices)])
+        prompt += "\nAnswer: "
+
+        return prompt, ["A","B","C","D"]
 
     def get_correct_answer(self, sample) -> str:
         return sample['answer']
 
-
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model_name = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
+    # model_name = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
+    model_name = "bert-base-uncased"
     model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     evaluator = MMLUEvaluator(model,tokenizer, device=device,num_few_shot=5)
     evaluator.load_dataset('cais/mmlu', subset='all')
     few_shot_data = [
-        {"question": "What is the capital of France?", "answer": "Paris"},
-        {"question": "What is 2+2?", "answer": "4"},
-        {"question": "Who wrote '1984'?", "answer": "George Orwell"},
-        {"question": "What is the boiling point of water?", "answer": "100 degrees Celsius"},
-        {"question": "What is the largest planet in the Solar System?", "answer": "Jupiter"},
+        {
+            "question": "What is the capital of France?",
+            "choices": ["A. Paris", "B. London", "C. Berlin", "D. Madrid"],
+            "answer": "A"
+        },
+        {
+            "question": "What is 2+2?",
+            "choices": ["A. 3", "B. 4", "C. 5", "D. 6"],
+            "answer": "B"
+        },
+        {
+            "question": "Who wrote '1984'?",
+            "choices": ["A. J.K. Rowling", "B. Ernest Hemingway", "C. George Orwell", "D. Mark Twain"],
+            "answer": "C"
+        },
+        {
+            "question": "What is the boiling point of water?",
+            "choices": ["A. 90 degrees Celsius", "B. 100 degrees Celsius", "C. 110 degrees Celsius",
+                        "D. 120 degrees Celsius"],
+            "answer": "B"
+        },
+        {
+            "question": "What is the largest planet in the Solar System?",
+            "choices": ["A. Earth", "B. Mars", "C. Jupiter", "D. Saturn"],
+            "answer": "C"
+        }
     ]
+
     evaluator.load_few_shot_examples(few_shot_data)
     evaluator.evaluate(num_samples=1000)
     # evaluator = HellaSwagEvaluator('bert-base-uncased', device=device)
