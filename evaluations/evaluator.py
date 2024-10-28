@@ -1,3 +1,5 @@
+from typing import List
+
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
@@ -6,7 +8,7 @@ from abc import ABC, abstractmethod
 
 
 class LogLikelihoodEvaluator(ABC):
-    def __init__(self, model,tokenizer, device='cuda', num_few_shot=0):
+    def __init__(self, model, tokenizer, device='cuda', num_few_shot=0):
         # self.model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
         # self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = model
@@ -104,22 +106,25 @@ class LogLikelihoodEvaluator(ABC):
         return context, continuations
 
     @abstractmethod
-    def get_correct_answer(self, sample) -> str:
+    def get_correct_answer(self, sample) -> List[str]:
         pass
 
     def evaluate_sample(self, sample):
         # 评估单个样本
         context, continuations = self.format_prompt(sample)
-        correct_answer_idx = self.get_correct_answer(sample)
+        correct_answer_idxs = self.get_correct_answer(sample)
 
         # 计算每个选项的log-likelihood
         loglikelihoods, max_tokens = self.calculate_loglikelihood(context, continuations)
 
         # 选择log-likelihood最大的选项
         predicted_idx = torch.argmax(torch.tensor(loglikelihoods)).item()
-        correct = predicted_idx == correct_answer_idx
+        correct = False
+        if predicted_idx in correct_answer_idxs:
+            correct = True
+        # correct = predicted_idx == correct_answer_idx
 
-        return correct, predicted_idx, correct_answer_idx, loglikelihoods, max_tokens
+        return correct, predicted_idx, correct_answer_idxs, loglikelihoods, max_tokens
 
     def evaluate(self, num_samples=100):
         # 评估多个样本的准确率
@@ -145,8 +150,8 @@ class HellaSwagEvaluator(LogLikelihoodEvaluator):
         continuations = sample['endings']
         return context, continuations
 
-    def get_correct_answer(self, sample) -> str:
-        return sample['label']
+    def get_correct_answer(self, sample):
+        return [sample['label']]
 
 
 class MMLUEvaluator(LogLikelihoodEvaluator):
@@ -156,7 +161,7 @@ class MMLUEvaluator(LogLikelihoodEvaluator):
         构建问题提示，形式为:
         "You are an expert in the field of text classification. Please choose the most appropriate option from [A, B, C, D] based on the given context and output only one option, followed directly by '#Answer: '."
         """
-        # 模板和示例之间的上下文处理
+        # 模板和示例之间的上下文处理    A B C D   1 2 3 4  -> A
         prompt = f"""You are an expert in the field of text classification. Please choose the most appropriate option from [A, B, C, D] based on the given context and output only one option. \n"""
         for example in self.few_shot_examples[:self.num_few_shot]:
             prompt += f"Question: {example['question']}\n"
@@ -171,10 +176,12 @@ class MMLUEvaluator(LogLikelihoodEvaluator):
         prompt += "\n".join([f"{chr(65 + idx)}. {choice}" for idx, choice in enumerate(choices)])
         prompt += "\nAnswer: "
 
-        return prompt, ["A","B","C","D"]
+        return prompt, ["A", "B", "C", "D"]
 
-    def get_correct_answer(self, sample) -> str:
-        return sample['answer']
+    def get_correct_answer(self, sample):
+        # 0: A, 1:B, 2:C, 3:D
+        correct_alpha = sample['answer'] # 已经对应具体的字母的索引位置，因为0位就是A，还要再加4即可，对应1的位置
+        return [correct_alpha,correct_alpha+4]
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -190,6 +197,8 @@ def main():
             "question": "What is the capital of France?",
             "choices": ["A. Paris", "B. London", "C. Berlin", "D. Madrid"],
             "answer": "A"
+            # question + choice -> choice: likehood -> token likelihood / length(token)  2023 -> lm harness
+            # question + choices + [A,B,C,D] -> mmlu Answer: A / Answer: B
         },
         {
             "question": "What is 2+2?",
@@ -214,12 +223,13 @@ def main():
         }
     ]
 
-    evaluator.load_few_shot_examples(few_shot_data)
+    # evaluator.load_few_shot_examples(few_shot_data)
     evaluator.evaluate(num_samples=1000)
     # evaluator = HellaSwagEvaluator('bert-base-uncased', device=device)
     # evaluator.load_dataset('AlekseyKorshuk/hellaswag', dataset_split='validation')
     # evaluator.evaluate(num_samples=30)
 
+# A,B,C,D -> 1,2,3,4
 
 if __name__ == '__main__':
     main()

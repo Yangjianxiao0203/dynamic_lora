@@ -138,7 +138,7 @@ class DynamicLoRAManager:
         for name, lora_layer in self.dynamic_lora_layers.items():
             lora_state_dict[name] = {
                 "lora_A": lora_layer.lora_A.detach().cpu(),
-                "lora_B": lora_layer.lora_B.detach().cpu()
+                "lora_B": lora_layer.lora_B.detach().cpu(),
             }
         torch.save(lora_state_dict, save_path)
         print(f"LoRA layers saved to {save_path}")
