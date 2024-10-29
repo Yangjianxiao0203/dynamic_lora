@@ -42,7 +42,7 @@ def mmlu_evaluate(model, tokenizer, device):
             "answer": "C"
         }
     ]
-    evaluator.load_few_shot_examples(few_shot_data)
+    # evaluator.load_few_shot_examples(few_shot_data)
     evaluator.evaluate(num_samples=1000)
 
 

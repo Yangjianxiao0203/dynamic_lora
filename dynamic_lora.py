@@ -9,6 +9,24 @@ from datasets import load_dataset
 import math
 
 
+MAX_LENGTH = 256
+
+dataset = load_dataset("tatsu-lab/alpaca")
+# dataset = load_dataset("cais/mmlu","all")
+model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
+output_dir_prefix = "./output/qwen15-alpaca"
+print("start loading")
+# all_dataset = dataset['train'].select(range(5000))
+# all_dataset = dataset["validation"]
+# all_dataset = dataset['train']
+columns_to_remove = ['output', 'input', 'instruction']
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+tokenizer = AutoTokenizer.from_pretrained(model_path,
+                                          use_fast=False, trust_remote_code=True)
+tokenizer.pad_token = tokenizer.eos_token
+
 def snapshot_lora_ranks(model, step_num, epoch, loss, file_name="singular_values.jsonl"):
     with open(f'./records/{file_name}', 'a') as f:
         for name, module in model.named_modules():
@@ -28,7 +46,7 @@ def snapshot_lora_ranks(model, step_num, epoch, loss, file_name="singular_values
 
 
 class DynamicLoRALayer(nn.Module):
-    def __init__(self, original_linear, r_max, name):
+    def __init__(self, original_linear, r_max, name, alpha = 32):
         super().__init__()
         self.original_linear = original_linear
         self.r_max = r_max
@@ -43,7 +61,7 @@ class DynamicLoRALayer(nn.Module):
         out_features = original_linear.out_features
         self.lora_A = nn.Parameter(torch.zeros(r_max, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, r_max))
-        self.scaling = 1 / r_max
+        self.scaling = alpha / r_max
         self.name = name
 
         # Initialize LoRA matrices
@@ -199,6 +217,70 @@ class AlpacaDataset(Dataset):
         }
 
 
+class MMLUDataset(Dataset):
+    def __init__(self, tokenized_dataset):
+        self.tokenized_dataset = tokenized_dataset
+
+    def __len__(self):
+        return len(self.tokenized_dataset)
+
+    def __getitem__(self, idx):
+        item = self.tokenized_dataset[idx]
+        return {
+            "input_ids": torch.tensor(item["input_ids"]),
+            "attention_mask": torch.tensor(item["attention_mask"]),
+            "labels": torch.tensor(item["labels"])
+        }
+
+
+def process_func(example):
+    def create_mmlu_prompt(context, choices):
+        """
+        构建成这种形式的格式 <|start_header_id|>user<|end_header_id|>\n\n{example['instruction_zh'] + example['input_zh']}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+        """
+        prompt = """
+        You are an expert in the field of text classification. Please choose the most appropriate option from [A, B, C, D] based on the given context and output only one option. \nQuestion: {}\n
+        """
+        indexs = ["A", "B", "C", "D"]
+        user_prompt = f"{context}\n" + "\n".join(
+            [f"{index}. {choice}" for index, choice in zip(indexs, choices)])
+        prompt = prompt.format(user_prompt)
+
+        return prompt
+
+    context = example["question"]
+    choices = example["choices"]
+    label = int(example["answer"])
+    indexs = ["A", "B", "C", "D"]
+    prompt = create_mmlu_prompt(context, choices)
+    instruction = tokenizer(prompt, add_special_tokens=False)
+    response = tokenizer(f"Answer: {indexs[label]}", add_special_tokens=False)
+
+    input_ids = instruction["input_ids"] + response["input_ids"] + [tokenizer.pad_token_id]
+    attention_mask = instruction["attention_mask"] + response["attention_mask"] + [1]  # 因为eos token咱们也是要关注的所以 补充为1
+    labels = [-100] * len(instruction["input_ids"]) + response["input_ids"] + [tokenizer.pad_token_id]
+
+    if len(input_ids) > MAX_LENGTH:
+        input_ids = input_ids[:MAX_LENGTH]
+        attention_mask = attention_mask[:MAX_LENGTH]
+        labels = labels[:MAX_LENGTH]
+    else:
+        padding_length = MAX_LENGTH - len(input_ids)
+        input_ids = input_ids + [tokenizer.pad_token_id] * padding_length
+        attention_mask = attention_mask + [0] * padding_length
+        labels = labels + [-100] * padding_length
+
+    assert len(input_ids) == MAX_LENGTH, "input_ids length not equal to MAX_LENGTH"
+    assert len(attention_mask) == MAX_LENGTH, "input_ids length not equal to MAX_LENGTH"
+    assert len(labels) == MAX_LENGTH, "input_ids length not equal to MAX_LENGTH"
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": labels
+    }
+
+
 def count_trainable_params(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -244,7 +326,7 @@ def evaluate(model, val_loader, device):
     return total_loss / len(val_loader)
 
 
-def main(model_path, keywords, snapshot_path = None, save_lora_path="lora_state.pth", load_lora_path=None):
+def main(model_path, keywords, snapshot_path=None, save_lora_path="lora_state.pth", load_lora_path=None):
     r_max = 32
     batch_size = 8
     learning_rate = 1e-4
@@ -265,10 +347,17 @@ def main(model_path, keywords, snapshot_path = None, save_lora_path="lora_state.
         dynamic_lora_manager.load_lora_layers(load_lora_path)
 
     # Load and prepare dataset
-    dataset = load_alpaca_dataset(tokenizer)
-    dataset = dataset.select(range(5000))
+    # dataset = load_alpaca_dataset(tokenizer)
+    # dataset = dataset.select(range(5000))
+    # train_dataset = AlpacaDataset(dataset)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    train_dataset = AlpacaDataset(dataset)
+    def load_mmlu_dataset(tokenizer, split="validation"):
+        dataset = load_dataset("cais/mmlu", "all")[split]
+        tokenized_dataset = dataset.map(lambda x: process_func(x), batched=False)
+        return tokenized_dataset
+    tokenized_dataset = load_mmlu_dataset(tokenizer, split="validation")
+    train_dataset = MMLUDataset(tokenized_dataset)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     # Optimizer and scheduler
@@ -304,4 +393,4 @@ if __name__ == "__main__":
     # model_path = "bert-base-uncased"
     keywords = ["q_proj", "k_proj", "v_proj"]
     # lora_path = "qwen_lora_state.pth"
-    main(model_path,keywords)
+    main(model_path, keywords)

@@ -25,7 +25,7 @@ dataset = load_dataset("cais/mmlu","all")
 model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
 output_dir_prefix = "./output/qwen15-alpaca"
 print("start loading")
-# all_dataset = dataset['train'].select(range(1000))
+#all_dataset = dataset['train'].select(range(5000))
 all_dataset = dataset["validation"]
 # all_dataset = dataset['train']
 columns_to_remove = ['output', 'input', 'instruction']
@@ -167,7 +167,7 @@ def train(lora_num):
     model_save_path = f"{output_dir_prefix}/final_model_r_{lora_num}"
 
     # 预处理数据集
-    # tokenized_dataset = all_dataset.map(process_func, batched=False, remove_columns=columns_to_remove)
+    #tokenized_dataset = all_dataset.map(process_func, batched=False, remove_columns=columns_to_remove)
     tokenized_dataset = all_dataset.map(process_func, batched=False)
     train_dataset = tokenized_dataset
     # train_dataset = load_mmlu_dataset(tokenizer, subset="all").select(range(1000))
@@ -179,7 +179,7 @@ def train(lora_num):
         target_modules=["q_proj", "k_proj", "v_proj"],
         inference_mode=False,
         r=lora_num,
-        lora_alpha=64
+        lora_alpha=1
         # lora_alpha=2*lora_num,
         # lora_dropout=0.1
     )
@@ -193,7 +193,7 @@ def train(lora_num):
         per_device_train_batch_size=8,
         gradient_accumulation_steps=1,
         logging_steps=3,
-        num_train_epochs=6,
+        num_train_epochs=2,
         save_steps=800,
         learning_rate=1e-4,
         # weight_decay=0.01,  # 默认参数
