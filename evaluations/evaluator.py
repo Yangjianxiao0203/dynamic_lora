@@ -176,7 +176,7 @@ class MMLUEvaluator(LogLikelihoodEvaluator):
         prompt += "\n".join([f"{chr(65 + idx)}. {choice}" for idx, choice in enumerate(choices)])
         prompt += "\nAnswer: "
 
-        return prompt, ["A", "B", "C", "D"]
+        return prompt, ["A", "B", "C", "D", "1","2","3","4"]
 
     def get_correct_answer(self, sample):
         # 0: A, 1:B, 2:C, 3:D
@@ -223,7 +223,7 @@ def main():
         }
     ]
 
-    # evaluator.load_few_shot_examples(few_shot_data)
+    evaluator.load_few_shot_examples(few_shot_data)
     evaluator.evaluate(num_samples=1000)
     # evaluator = HellaSwagEvaluator('bert-base-uncased', device=device)
     # evaluator.load_dataset('AlekseyKorshuk/hellaswag', dataset_split='validation')
