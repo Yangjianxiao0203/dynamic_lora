@@ -4,3 +4,4 @@ oss_handler/.env
 /images
 **/*.pth
 /output
+/records

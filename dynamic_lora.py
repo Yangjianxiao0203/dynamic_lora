@@ -1,4 +1,5 @@
 import json
+import os
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,7 @@ import math
 
 from load_data.alpaca import Alpaca
 from load_data.mmlu import MMLU
+from load_data.hellaswag import HellaSwag
 
 
 def snapshot_lora_ranks(model, step_num, epoch, loss, file_name="singular_values.jsonl"):
@@ -112,7 +114,7 @@ class DynamicLoRALayer(nn.Module):
 
 
 class DynamicLoRAManager:
-    def __init__(self, model, r_max, keywords, alpha):
+    def __init__(self, model, r_max, keywords, alpha=64):
         self.model = model
         self.r_max = r_max
         self.alpha = alpha
@@ -178,8 +180,16 @@ def count_trainable_params(model):
 
 def train(model, train_loader, optimizer, scheduler, device, epoch, dynamic_lora_manager=None, **kwargs):
     snapshot_path = kwargs.get("snapshot_path", None)
+    if snapshot_path:
+        if not os.path.exists('./records/a.png'):
+            os.makedirs('./records', exist_ok=True)
+        with open(f'./records/{snapshot_path}', 'w') as f:
+            pass  # 这将清空文件内容
+    snapshot_num = kwargs.get("snapshot_num", 20)
     model.train()
     total_loss = 0
+    total_steps = len(train_loader)
+    n = max(1, total_steps // snapshot_num)  # 确保 n 至少为1，避免零步间隔
     for index, batch in enumerate(train_loader):
         optimizer.zero_grad()
         input_ids = batch["input_ids"].to(device)
@@ -196,7 +206,7 @@ def train(model, train_loader, optimizer, scheduler, device, epoch, dynamic_lora
         scheduler.step()
 
         total_loss += loss.item()
-        if snapshot_path:
+        if snapshot_path and index % n == 0:
             snapshot_lora_ranks(model, index, epoch, loss, file_name=snapshot_path)
 
     return total_loss / len(train_loader)
@@ -239,11 +249,14 @@ def main(model_path, keywords, snapshot_path=None, save_lora_path="lora_state.pt
     if load_lora_path:
         dynamic_lora_manager.load_lora_layers(load_lora_path)
 
-    train_dataset = MMLU(tokenizer).get_dataset(split="validation", tensor=True)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    # train_dataset = MMLU(tokenizer).get_dataset(split="validation", tensor=True)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     # train_dataset = Alpaca(tokenizer).get_dataset(split="train", tensor=True)
     # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    #
+    train_dataset = HellaSwag(tokenizer).get_dataset(split="validation", tensor=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     # Optimizer and scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -255,11 +268,12 @@ def main(model_path, keywords, snapshot_path=None, save_lora_path="lora_state.pt
         avg_rank = dynamic_lora_manager.update_lora_ranks(scale)
         print(f"Epoch {epoch + 1}/{num_epochs}")
         train_loss = train(model, train_loader, optimizer, scheduler, device, epoch, dynamic_lora_manager,
-                           snapshot_path=snapshot_path)
+                           snapshot_path=snapshot_path, snapshot_num=150)
         if pre_loss:
             scale = pre_loss / train_loss
         pre_loss = train_loss
-        val_loss = evaluate(model, train_loader, device)
+        # val_loss = evaluate(model, train_loader, device)
+        val_loss = 0.000
         print(
             f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Avg LoRA Rank: {avg_rank:.2f}")
 
@@ -277,4 +291,7 @@ if __name__ == "__main__":
     # model_path = "bert-base-uncased"
     keywords = ["q_proj", "k_proj", "v_proj"]
     # lora_path = "qwen_lora_state.pth"
-    main(model_path, keywords)
+    # main(model_path, keywords)
+
+    snapshot_path = f"qwen-0_5-exp.jsonl"
+    main(model_path,keywords,snapshot_path=snapshot_path)

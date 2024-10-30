@@ -77,7 +77,7 @@ class HellaSwag:
     def get_dataset(self, split=None, tensor=True):
         if not split:
             raise Exception("HellaSwag must have a split: train/validation/test")
-        dataset = load_dataset("hellaswag")[split]
+        dataset = load_dataset("AlekseyKorshuk/hellaswag")[split]
         tokenized_dataset = dataset.map(lambda x: self.process_func(x), batched=False)
         if tensor:
             return HellaSwagDataset(tokenized_dataset)

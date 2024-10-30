@@ -3,7 +3,7 @@ from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer, StoppingCriteria, StoppingCriteriaList, \
     TextIteratorStreamer
 
-from evaluations.evaluator import MMLUEvaluator
+from evaluations.evaluator import MMLUEvaluator, HellaSwagEvaluator
 from dynamic_lora import DynamicLoRAManager
 
 model_name = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
@@ -46,15 +46,26 @@ def mmlu_evaluate(model, tokenizer, device):
     evaluator.evaluate(num_samples=1000)
 
 
-def evaluate_original():
+def hellaswag_evaluate(model, tokenizer, device):
+    evaluator = HellaSwagEvaluator(model, tokenizer, device=device)
+    evaluator.load_dataset('AlekseyKorshuk/hellaswag')
+    evaluator.evaluate(num_samples=1000)
+
+def evaluate_original(name= "mmlu"):
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(count_trainable_params(model)) # 494032768
-    mmlu_evaluate(model, tokenizer, device)
+    if name == "hellaswag":
+        hellaswag_evaluate(model, tokenizer, device)
+        return
+    if name == "mmlu":
+        mmlu_evaluate(model, tokenizer, device)
+        return
+    #mmlu_evaluate(model, tokenizer, device)
 
 
-def evaluate_hf_peft():
+def evaluate_hf_peft(name= "mmlu"):
     adapters_name = "output/qwen15-alpaca/final_model_r_32"
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto")
     model = PeftModel.from_pretrained(model, adapters_name)
@@ -63,10 +74,16 @@ def evaluate_hf_peft():
     print(count_trainable_params(model)) #496981888
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    mmlu_evaluate(model, tokenizer, device)
+    # mmlu_evaluate(model, tokenizer, device)
+    if name == "hellaswag":
+        hellaswag_evaluate(model, tokenizer, device)
+        return
+    if name == "mmlu":
+        mmlu_evaluate(model, tokenizer, device)
+        return
 
 
-def evaluate_torch_model():
+def evaluate_torch_model(name= "mmlu"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     lora_path = "lora_state.pth"
     model_path = model_name
@@ -75,15 +92,23 @@ def evaluate_torch_model():
     model = AutoModelForCausalLM.from_pretrained(model_path).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     r_max = 32
+    alpha = 64
     keywords = ["q_proj", "k_proj", "v_proj"]
-    dynamic_lora_manager = DynamicLoRAManager(model, r_max, keywords)
+    dynamic_lora_manager = DynamicLoRAManager(model, r_max, keywords,alpha)
     dynamic_lora_manager.replace_with_dynamic_lora()
     dynamic_lora_manager.load_lora_layers(lora_path)
     model = dynamic_lora_manager.model
-    mmlu_evaluate(model, tokenizer, device)
+    # mmlu_evaluate(model, tokenizer, device)
+    if name == "hellaswag":
+        hellaswag_evaluate(model, tokenizer, device)
+        return
+    if name == "mmlu":
+        mmlu_evaluate(model, tokenizer, device)
+        return
 
 
 if __name__ == '__main__':
-    # evaluate_hf_peft()
-    # evaluate_original()
-    evaluate_torch_model()
+    name = "hellaswag"
+    # evaluate_hf_peft(name)
+    # evaluate_original(name)
+    evaluate_torch_model(name)

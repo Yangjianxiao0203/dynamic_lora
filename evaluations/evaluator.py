@@ -92,6 +92,14 @@ class LogLikelihoodEvaluator(ABC):
         # decoded_max_token = self.tokenizer.decode(max_tokens, skip_special_tokens=True)
         # print(f"Predicted Token with Highest Probability: {decoded_max_token}")
 
+        """
+        Log-likelihood 计算方式：在 calculate_loglikelihood 函数中，你对每个续文本（例如 A、B、C、D）计算其所有 token 的 log 概率的平均值。这个平均 log-likelihood 能反映续文本整体的可能性，但不是仅看最高概率字符的单独表现。
+
+        单字符最高概率：max_tokens 记录了每个选项中概率最大的 token，并不是整个续文本的概率表现。因此即使一个选项中有某个字符概率特别高，这并不意味着整个续文本的平均 log-likelihood 也是最高的。
+
+        实际预测逻辑：在 evaluate_sample 中的 predicted_idx 是通过选择 log-likelihood 最大的选项（即整个续文本可能性最大的选项）得出的，而你打印的 highest prob 实际上是 max_tokens 中的字符，这只是表示该选项中出现概率最高的某个字符而已，并不能代表整体的 log-likelihood。
+        """
+
         return loglikelihoods, max_tokens
 
     @abstractmethod
@@ -132,9 +140,9 @@ class LogLikelihoodEvaluator(ABC):
         for i, sample in enumerate(self.dataset.select(range(num_samples))):
             correct, predicted_idx, correct_answer_idx, loglikelihoods, max_tokens = self.evaluate_sample(sample)
             correct_count += int(correct)
-            decoded_max_token = self.tokenizer.decode(max_tokens[0], skip_special_tokens=True)
+            decoded_max_tokens = [self.tokenizer.decode(max_token, skip_special_tokens=True) for max_token in max_tokens]
             print(
-                f"[{i}]: Predicted {predicted_idx}, Correct {correct_answer_idx}, Log-likelihoods: {loglikelihoods}, highest prob: {decoded_max_token}")
+                f"[{i}]: Predicted {predicted_idx}, Correct {correct_answer_idx}, highest prob: {decoded_max_tokens}, Log-likelihoods: {loglikelihoods}")
 
         accuracy = correct_count / num_samples
         print(f"Accuracy: {accuracy:.2f}")
