@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 import math
+from load_data.mmlu import MMLU
 
 
 MAX_LENGTH = 256
@@ -352,12 +353,15 @@ def main(model_path, keywords, snapshot_path=None, save_lora_path="lora_state.pt
     # train_dataset = AlpacaDataset(dataset)
     # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-    def load_mmlu_dataset(tokenizer, split="validation"):
-        dataset = load_dataset("cais/mmlu", "all")[split]
-        tokenized_dataset = dataset.map(lambda x: process_func(x), batched=False)
-        return tokenized_dataset
-    tokenized_dataset = load_mmlu_dataset(tokenizer, split="validation")
-    train_dataset = MMLUDataset(tokenized_dataset)
+    # def load_mmlu_dataset(tokenizer, split="validation"):
+    #     dataset = load_dataset("cais/mmlu", "all")[split]
+    #     tokenized_dataset = dataset.map(lambda x: process_func(x), batched=False)
+    #     return tokenized_dataset
+    # tokenized_dataset = load_mmlu_dataset(tokenizer, split="validation")
+    # train_dataset = MMLUDataset(tokenized_dataset)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    train_dataset = MMLU(tokenizer).get_dataset(split="validation",tensor=True)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     # Optimizer and scheduler
