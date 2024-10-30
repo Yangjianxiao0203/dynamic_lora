@@ -142,16 +142,26 @@ class LogLikelihoodEvaluator(ABC):
 
 
 class HellaSwagEvaluator(LogLikelihoodEvaluator):
-
     def format_prompt(self, sample):
-        """格式化 HellaSwag 的问题和选项"""
+        """Format HellaSwag sample into a prompt with labeled multiple-choice options."""
+        context = sample['ctx_a'] + " " + sample['ctx_b']
+        choices = sample['endings']
+        labels = ["A", "B", "C", "D"]
 
-        context = sample['ctx_a'] + " " + sample['ctx_b']  # 上下文
-        continuations = sample['endings']
-        return context, continuations
+        # Format context to include labeled options
+        prompt = f"Context: {context}\n"
+        prompt += "Choose the option that best continues the given context:\n"
+        prompt += "\n".join([f"{label}. {choice}" for label, choice in zip(labels, choices)])
+        prompt += "\nAnswer:"
+
+        # Continuations to choose from (labeled answers and numeric equivalents)
+        continuations = ["A", "B", "C", "D", "1", "2", "3", "4"]
+        return prompt, continuations
 
     def get_correct_answer(self, sample):
-        return [sample['label']]
+        correct_label = sample['label']  # e.g., 0, 1, 2, or 3 for A, B, C, D
+        return [correct_label, correct_label + 4]  # Includes offset for numeric equivalent
+
 
 
 class MMLUEvaluator(LogLikelihoodEvaluator):

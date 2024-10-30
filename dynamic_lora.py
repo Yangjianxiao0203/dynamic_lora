@@ -7,26 +7,10 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 import math
+
+from load_data.alpaca import Alpaca
 from load_data.mmlu import MMLU
 
-
-MAX_LENGTH = 256
-
-dataset = load_dataset("tatsu-lab/alpaca")
-# dataset = load_dataset("cais/mmlu","all")
-model_path = "/root/autodl-tmp/models/qwen/Qwen2-0___5B"
-output_dir_prefix = "./output/qwen15-alpaca"
-print("start loading")
-# all_dataset = dataset['train'].select(range(5000))
-# all_dataset = dataset["validation"]
-# all_dataset = dataset['train']
-columns_to_remove = ['output', 'input', 'instruction']
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-tokenizer = AutoTokenizer.from_pretrained(model_path,
-                                          use_fast=False, trust_remote_code=True)
-tokenizer.pad_token = tokenizer.eos_token
 
 def snapshot_lora_ranks(model, step_num, epoch, loss, file_name="singular_values.jsonl"):
     with open(f'./records/{file_name}', 'a') as f:
@@ -47,7 +31,7 @@ def snapshot_lora_ranks(model, step_num, epoch, loss, file_name="singular_values
 
 
 class DynamicLoRALayer(nn.Module):
-    def __init__(self, original_linear, r_max, name, alpha = 32):
+    def __init__(self, original_linear, r_max, name, alpha=32):
         super().__init__()
         self.original_linear = original_linear
         self.r_max = r_max
@@ -128,9 +112,10 @@ class DynamicLoRALayer(nn.Module):
 
 
 class DynamicLoRAManager:
-    def __init__(self, model, r_max, keywords):
+    def __init__(self, model, r_max, keywords, alpha):
         self.model = model
         self.r_max = r_max
+        self.alpha = alpha
         self.keywords = keywords
         self.dynamic_lora_layers = {}
         self.device = next(model.parameters()).device
@@ -147,7 +132,7 @@ class DynamicLoRAManager:
                 child_name = name.split('.')[-1]
                 print(f"Replacing {parent_name}.{child_name} with DynamicLoRALayer")
                 parent = self.model.get_submodule(parent_name)
-                dynamic_lora = DynamicLoRALayer(module, self.r_max, name)
+                dynamic_lora = DynamicLoRALayer(module, self.r_max, name,self.alpha)
                 setattr(parent, child_name, dynamic_lora)
                 self.dynamic_lora_layers[name] = dynamic_lora
         print(f"Total trainable parameters: {count_trainable_params(self.model)}")
@@ -185,101 +170,6 @@ class DynamicLoRAManager:
             verbose = False
         avg_rank = total_rank / num_lora_layers if num_lora_layers > 0 else 0
         return avg_rank
-
-
-def load_alpaca_dataset(tokenizer, max_length=512):
-    dataset = load_dataset("tatsu-lab/alpaca")
-
-    def tokenize_function(examples):
-        prompt = "Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\n{instruction}\n\n### Input:\n{input}\n\n### Response:\n{output}"
-        texts = []
-        for instruction, input_text, output_text in zip(examples["instruction"], examples["input"], examples["output"]):
-            text = prompt.format(instruction=instruction, input=input_text, output=output_text)
-            texts.append(text)
-        return tokenizer(texts, padding="max_length", truncation=True, max_length=max_length)
-
-    tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset["train"].column_names)
-    return tokenized_dataset["train"]
-
-
-class AlpacaDataset(Dataset):
-    def __init__(self, tokenized_dataset):
-        self.tokenized_dataset = tokenized_dataset
-
-    def __len__(self):
-        return len(self.tokenized_dataset)
-
-    def __getitem__(self, idx):
-        item = self.tokenized_dataset[idx]
-        return {
-            "input_ids": torch.tensor(item["input_ids"]),
-            "attention_mask": torch.tensor(item["attention_mask"]),
-            "labels": torch.tensor(item["input_ids"])
-        }
-
-
-class MMLUDataset(Dataset):
-    def __init__(self, tokenized_dataset):
-        self.tokenized_dataset = tokenized_dataset
-
-    def __len__(self):
-        return len(self.tokenized_dataset)
-
-    def __getitem__(self, idx):
-        item = self.tokenized_dataset[idx]
-        return {
-            "input_ids": torch.tensor(item["input_ids"]),
-            "attention_mask": torch.tensor(item["attention_mask"]),
-            "labels": torch.tensor(item["labels"])
-        }
-
-
-def process_func(example):
-    def create_mmlu_prompt(context, choices):
-        """
-        构建成这种形式的格式 <|start_header_id|>user<|end_header_id|>\n\n{example['instruction_zh'] + example['input_zh']}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
-        """
-        prompt = """
-        You are an expert in the field of text classification. Please choose the most appropriate option from [A, B, C, D] based on the given context and output only one option. \nQuestion: {}\n
-        """
-        indexs = ["A", "B", "C", "D"]
-        user_prompt = f"{context}\n" + "\n".join(
-            [f"{index}. {choice}" for index, choice in zip(indexs, choices)])
-        prompt = prompt.format(user_prompt)
-
-        return prompt
-
-    context = example["question"]
-    choices = example["choices"]
-    label = int(example["answer"])
-    indexs = ["A", "B", "C", "D"]
-    prompt = create_mmlu_prompt(context, choices)
-    instruction = tokenizer(prompt, add_special_tokens=False)
-    response = tokenizer(f"Answer: {indexs[label]}", add_special_tokens=False)
-
-    input_ids = instruction["input_ids"] + response["input_ids"] + [tokenizer.pad_token_id]
-    attention_mask = instruction["attention_mask"] + response["attention_mask"] + [1]  # 因为eos token咱们也是要关注的所以 补充为1
-    labels = [-100] * len(instruction["input_ids"]) + response["input_ids"] + [tokenizer.pad_token_id]
-
-    if len(input_ids) > MAX_LENGTH:
-        input_ids = input_ids[:MAX_LENGTH]
-        attention_mask = attention_mask[:MAX_LENGTH]
-        labels = labels[:MAX_LENGTH]
-    else:
-        padding_length = MAX_LENGTH - len(input_ids)
-        input_ids = input_ids + [tokenizer.pad_token_id] * padding_length
-        attention_mask = attention_mask + [0] * padding_length
-        labels = labels + [-100] * padding_length
-
-    assert len(input_ids) == MAX_LENGTH, "input_ids length not equal to MAX_LENGTH"
-    assert len(attention_mask) == MAX_LENGTH, "input_ids length not equal to MAX_LENGTH"
-    assert len(labels) == MAX_LENGTH, "input_ids length not equal to MAX_LENGTH"
-
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "labels": labels
-    }
 
 
 def count_trainable_params(model):
@@ -332,6 +222,8 @@ def main(model_path, keywords, snapshot_path=None, save_lora_path="lora_state.pt
     batch_size = 8
     learning_rate = 1e-4
     num_epochs = 2
+    alpha = 64
+    scale = 1 / 3
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -340,29 +232,18 @@ def main(model_path, keywords, snapshot_path=None, save_lora_path="lora_state.pt
     model = AutoModelForCausalLM.from_pretrained(model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    dynamic_lora_manager = DynamicLoRAManager(model, r_max, keywords)
+    dynamic_lora_manager = DynamicLoRAManager(model, r_max, keywords, alpha)
     dynamic_lora_manager.replace_with_dynamic_lora()
     model.to(device)
 
     if load_lora_path:
         dynamic_lora_manager.load_lora_layers(load_lora_path)
 
-    # Load and prepare dataset
-    # dataset = load_alpaca_dataset(tokenizer)
-    # dataset = dataset.select(range(5000))
-    # train_dataset = AlpacaDataset(dataset)
-    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-    # def load_mmlu_dataset(tokenizer, split="validation"):
-    #     dataset = load_dataset("cais/mmlu", "all")[split]
-    #     tokenized_dataset = dataset.map(lambda x: process_func(x), batched=False)
-    #     return tokenized_dataset
-    # tokenized_dataset = load_mmlu_dataset(tokenizer, split="validation")
-    # train_dataset = MMLUDataset(tokenized_dataset)
-    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-    train_dataset = MMLU(tokenizer).get_dataset(split="validation",tensor=True)
+    train_dataset = MMLU(tokenizer).get_dataset(split="validation", tensor=True)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    # train_dataset = Alpaca(tokenizer).get_dataset(split="train", tensor=True)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     # Optimizer and scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -370,7 +251,6 @@ def main(model_path, keywords, snapshot_path=None, save_lora_path="lora_state.pt
 
     # Training loop
     pre_loss = None
-    scale = 1 / 3
     for epoch in range(num_epochs):
         avg_rank = dynamic_lora_manager.update_lora_ranks(scale)
         print(f"Epoch {epoch + 1}/{num_epochs}")
